@@ -10,6 +10,7 @@ from fredapi import Fred
 import traceback
 import concurrent.futures
 import time
+import random
 
 # Set page configuration
 st.set_page_config(page_title="Comprehensive Financial Dashboard", layout="wide")
@@ -17,6 +18,7 @@ st.set_page_config(page_title="Comprehensive Financial Dashboard", layout="wide"
 # Function to log errors
 def log_error(error):
     st.error(f"An error occurred: {str(error)}")
+    st.error("Please try refreshing the page. If the problem persists, some data sources may be unavailable.")
     st.text("Traceback:")
     st.text(traceback.format_exc())
 
@@ -43,28 +45,36 @@ def get_stock_data(symbols, start_date, end_date):
         log_error(e)
         return None
 
-# Fetch crypto data with timeout
-def get_crypto_data_with_timeout(cg, coin_id, start_timestamp, end_timestamp, timeout=10):
+# Fetch crypto data with timeout and retry
+def get_crypto_data_with_retry(cg, coin_id, start_timestamp, end_timestamp, max_retries=3, base_timeout=15):
     def fetch_data():
         return cg.get_coin_market_chart_range_by_id(id=coin_id, vs_currency='usd', from_timestamp=start_timestamp, to_timestamp=end_timestamp)
 
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        future = executor.submit(fetch_data)
+    for attempt in range(max_retries):
+        timeout = base_timeout * (2 ** attempt)  # Exponential backoff
         try:
-            data = future.result(timeout=timeout)
-            df = pd.DataFrame(data['prices'], columns=['timestamp', coin_id.capitalize()])
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
-            df.set_index('timestamp', inplace=True)
-            return df
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(fetch_data)
+                data = future.result(timeout=timeout)
+                df = pd.DataFrame(data['prices'], columns=['timestamp', coin_id.capitalize()])
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+                df.set_index('timestamp', inplace=True)
+                return df
         except concurrent.futures.TimeoutError:
-            raise TimeoutError(f"CoinGecko API call for {coin_id} timed out after {timeout} seconds")
+            if attempt < max_retries - 1:
+                st.warning(f"CoinGecko API call for {coin_id} timed out after {timeout} seconds. Retrying... (Attempt {attempt + 1}/{max_retries})")
+                time.sleep(random.uniform(1, 3))  # Random delay before retry
+            else:
+                raise TimeoutError(f"CoinGecko API call for {coin_id} timed out after {max_retries} attempts")
+        except Exception as e:
+            raise e
 
 # Fetch crypto data wrapper
 def get_crypto_data_wrapper(cg):
     @st.cache_data(ttl=3600)
     def get_crypto_data(coin_id, start_timestamp, end_timestamp):
         try:
-            return get_crypto_data_with_timeout(cg, coin_id, start_timestamp, end_timestamp)
+            return get_crypto_data_with_retry(cg, coin_id, start_timestamp, end_timestamp)
         except Exception as e:
             log_error(e)
             return None
@@ -108,9 +118,16 @@ def get_multi_asset_data(cg, fred, days=30):
     status_text.text("Fetching cryptocurrency data...")
     get_crypto_data = get_crypto_data_wrapper(cg)
     btc_data = get_crypto_data('bitcoin', int(start_date.timestamp()), int(end_date.timestamp()))
-    progress_bar.progress(50)
+    if btc_data is None:
+        st.error("Failed to fetch Bitcoin data. Skipping...")
+    else:
+        progress_bar.progress(50)
+    
     eth_data = get_crypto_data('ethereum', int(start_date.timestamp()), int(end_date.timestamp()))
-    progress_bar.progress(75)
+    if eth_data is None:
+        st.error("Failed to fetch Ethereum data. Skipping...")
+    else:
+        progress_bar.progress(75)
     
     # FRED data
     status_text.text("Fetching economic indicators...")
@@ -126,7 +143,10 @@ def get_multi_asset_data(cg, fred, days=30):
     # Combine all data
     try:
         status_text.text("Combining data...")
-        combined_data = pd.concat([yf_data, btc_data, eth_data, fred_data], axis=1)
+        data_frames = [df for df in [yf_data, btc_data, eth_data, fred_data] if df is not None]
+        if not data_frames:
+            raise ValueError("No data available to combine")
+        combined_data = pd.concat(data_frames, axis=1)
         combined_data.index.name = 'date'
         status_text.text("Data fetching completed.")
         time.sleep(1)  # Give user a moment to see the completion message
@@ -138,7 +158,54 @@ def get_multi_asset_data(cg, fred, days=30):
         status_text.text("Error occurred while combining data.")
         return None
 
-# ... (rest of the code remains the same)
+# Function to display the dashboard
+def display_dashboard(data):
+    # Resample data to daily frequency
+    daily_data = data.resample('D').last()
+
+    # Calculate percentage changes
+    pct_change = daily_data.pct_change().mul(100)
+
+    # Create tabs for different views
+    tabs = st.tabs(["Overview", "Asset Comparison", "Economic Indicators"])
+
+    with tabs[0]:
+        st.header("Market Overview")
+        col1, col2 = st.columns(2)
+
+        # Latest values
+        with col1:
+            st.subheader("Latest Values")
+            latest_values = daily_data.iloc[-1].dropna()
+            for asset, value in latest_values.items():
+                st.metric(asset, f"{value:.2f}", f"{pct_change.iloc[-1][asset]:.2f}%")
+
+        # Heatmap of correlations
+        with col2:
+            st.subheader("Correlation Heatmap")
+            corr_matrix = daily_data.pct_change().corr()
+            fig = px.imshow(corr_matrix, text_auto=True, aspect="auto")
+            st.plotly_chart(fig, use_container_width=True)
+
+    with tabs[1]:
+        st.header("Asset Comparison")
+        assets = st.multiselect("Select assets to compare", daily_data.columns.tolist(), default=daily_data.columns[:3].tolist())
+        if assets:
+            fig = px.line(daily_data[assets], title="Asset Price Comparison")
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Normalized comparison
+            st.subheader("Normalized Comparison (Start = 100)")
+            normalized_data = daily_data[assets].div(daily_data[assets].iloc[0]).mul(100)
+            fig_norm = px.line(normalized_data, title="Normalized Asset Comparison")
+            st.plotly_chart(fig_norm, use_container_width=True)
+
+    with tabs[2]:
+        st.header("Economic Indicators")
+        indicators = [col for col in daily_data.columns if col in ['US Unemployment Rate', 'US Inflation Rate', 'US GDP Growth']]
+        for indicator in indicators:
+            fig = px.line(daily_data[indicator], title=indicator)
+            st.plotly_chart(fig, use_container_width=True)
 
 # Main function to run the dashboard
 def main():
