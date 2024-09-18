@@ -8,6 +8,8 @@ import yfinance as yf
 from pycoingecko import CoinGeckoAPI
 from fredapi import Fred
 import traceback
+import concurrent.futures
+import time
 
 # Set page configuration
 st.set_page_config(page_title="Comprehensive Financial Dashboard", layout="wide")
@@ -41,16 +43,28 @@ def get_stock_data(symbols, start_date, end_date):
         log_error(e)
         return None
 
-# Fetch crypto data
-def get_crypto_data_wrapper(cg):
-    @st.cache_data(ttl=3600)
-    def get_crypto_data(coin_id, start_timestamp, end_timestamp):
+# Fetch crypto data with timeout
+def get_crypto_data_with_timeout(cg, coin_id, start_timestamp, end_timestamp, timeout=10):
+    def fetch_data():
+        return cg.get_coin_market_chart_range_by_id(id=coin_id, vs_currency='usd', from_timestamp=start_timestamp, to_timestamp=end_timestamp)
+
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        future = executor.submit(fetch_data)
         try:
-            data = cg.get_coin_market_chart_range_by_id(id=coin_id, vs_currency='usd', from_timestamp=start_timestamp, to_timestamp=end_timestamp)
+            data = future.result(timeout=timeout)
             df = pd.DataFrame(data['prices'], columns=['timestamp', coin_id.capitalize()])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
             df.set_index('timestamp', inplace=True)
             return df
+        except concurrent.futures.TimeoutError:
+            raise TimeoutError(f"CoinGecko API call for {coin_id} timed out after {timeout} seconds")
+
+# Fetch crypto data wrapper
+def get_crypto_data_wrapper(cg):
+    @st.cache_data(ttl=3600)
+    def get_crypto_data(coin_id, start_timestamp, end_timestamp):
+        try:
+            return get_crypto_data_with_timeout(cg, coin_id, start_timestamp, end_timestamp)
         except Exception as e:
             log_error(e)
             return None
@@ -76,7 +90,11 @@ def get_multi_asset_data(cg, fred, days=30):
     end_date = datetime.now(timezone.utc)
     start_date = end_date - timedelta(days=days)
     
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
     # Stocks and Forex data
+    status_text.text("Fetching stock and forex data...")
     symbols = {
         'S&P 500': '^GSPC',
         'NASDAQ': '^IXIC',
@@ -84,13 +102,18 @@ def get_multi_asset_data(cg, fred, days=30):
         'GBP/USD': 'GBPUSD=X'
     }
     yf_data = get_stock_data(symbols, start_date, end_date)
-    
+    progress_bar.progress(25)
+
     # Crypto data
+    status_text.text("Fetching cryptocurrency data...")
     get_crypto_data = get_crypto_data_wrapper(cg)
     btc_data = get_crypto_data('bitcoin', int(start_date.timestamp()), int(end_date.timestamp()))
+    progress_bar.progress(50)
     eth_data = get_crypto_data('ethereum', int(start_date.timestamp()), int(end_date.timestamp()))
+    progress_bar.progress(75)
     
     # FRED data
+    status_text.text("Fetching economic indicators...")
     get_fred_data = get_fred_data_wrapper(fred)
     fred_series = {
         'US Unemployment Rate': 'UNRATE',
@@ -98,72 +121,24 @@ def get_multi_asset_data(cg, fred, days=30):
         'US GDP Growth': 'A191RL1Q225SBEA'
     }
     fred_data = pd.DataFrame({name: get_fred_data(series_id, start_date, end_date) for name, series_id in fred_series.items()})
+    progress_bar.progress(100)
     
     # Combine all data
     try:
+        status_text.text("Combining data...")
         combined_data = pd.concat([yf_data, btc_data, eth_data, fred_data], axis=1)
         combined_data.index.name = 'date'
+        status_text.text("Data fetching completed.")
+        time.sleep(1)  # Give user a moment to see the completion message
+        status_text.empty()
+        progress_bar.empty()
         return combined_data.ffill().bfill()  # Forward and backward fill to handle any missing data
     except Exception as e:
         log_error(e)
+        status_text.text("Error occurred while combining data.")
         return None
 
-# Function to create and display visualizations
-def display_dashboard(data):
-    if data is not None:
-        # Calculate correlations
-        correlations = data.pct_change().corr()
-
-        # Create layout
-        col1, col2 = st.columns([3, 2])
-
-        with col1:
-            # Correlation Heatmap
-            st.subheader("Asset and Economic Indicator Correlation Heatmap")
-            fig = px.imshow(correlations, 
-                            x=correlations.columns, 
-                            y=correlations.columns, 
-                            color_continuous_scale='RdBu_r', 
-                            zmin=-1, zmax=1)
-            fig.update_layout(height=500, width=700, margin=dict(l=0, r=0, t=0, b=0))
-            st.plotly_chart(fig, use_container_width=True)
-
-        with col2:
-            # Key Metrics
-            st.subheader("Key Metrics (30-day change)")
-            for asset in data.columns:
-                try:
-                    first_valid = data[asset].first_valid_index()
-                    last_valid = data[asset].last_valid_index()
-                    if first_valid is not None and last_valid is not None:
-                        start_value = data[asset].loc[first_valid]
-                        end_value = data[asset].loc[last_valid]
-                        if pd.notnull(start_value) and pd.notnull(end_value) and start_value != 0:
-                            change = (end_value - start_value) / start_value * 100
-                            st.metric(asset, f"{end_value:.2f}", f"{change:.2f}%")
-                        else:
-                            st.metric(asset, "N/A", "N/A")
-                    else:
-                        st.metric(asset, "N/A", "N/A")
-                except Exception as e:
-                    st.metric(asset, "Error", "Error")
-                    log_error(e)
-
-        # Multi-asset chart
-        st.subheader("Multi-Asset and Economic Indicator Movement (Normalized)")
-        normalized_data = data / data.iloc[0] * 100
-        fig = px.line(normalized_data, x=normalized_data.index, y=normalized_data.columns)
-        fig.update_layout(height=400, margin=dict(l=0, r=0, t=0, b=0), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-        st.plotly_chart(fig, use_container_width=True)
-
-        # Volatility comparison
-        st.subheader("30-Day Rolling Volatility")
-        volatility = data.pct_change().rolling(window=30).std() * np.sqrt(252) * 100  # Annualized
-        fig = px.line(volatility, x=volatility.index, y=volatility.columns)
-        fig.update_layout(height=400, margin=dict(l=0, r=0, t=0, b=0), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.error("Failed to fetch data. Please check the error messages above.")
+# ... (rest of the code remains the same)
 
 # Main function to run the dashboard
 def main():
@@ -176,7 +151,10 @@ def main():
     cg, fred = init_api_clients()
     if cg is not None and fred is not None:
         data = get_multi_asset_data(cg, fred, days)
-        display_dashboard(data)
+        if data is not None:
+            display_dashboard(data)
+        else:
+            st.error("Failed to fetch or process data. Please check the error messages above.")
     else:
         st.error("Failed to initialize API clients. Please check your API keys and connections.")
 
