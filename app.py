@@ -19,6 +19,7 @@ def log_error(error):
     st.text(traceback.format_exc())
 
 # Initialize API clients
+@st.cache_resource
 def init_api_clients():
     try:
         cg = CoinGeckoAPI()
@@ -29,6 +30,7 @@ def init_api_clients():
         return None, None
 
 # Function to get multi-asset data
+@st.cache_data(ttl=3600)
 def get_multi_asset_data(cg, fred, days=30):
     end_date = datetime.now(timezone.utc)
     start_date = end_date - timedelta(days=days)
@@ -43,7 +45,7 @@ def get_multi_asset_data(cg, fred, days=30):
         }
         yf_data = yf.download(list(symbols.values()), start=start_date, end=end_date)['Close']
         yf_data.columns = symbols.keys()
-        yf_data.index = yf_data.index.tz_localize('UTC')
+        yf_data.index = yf_data.index.tz_convert('UTC')
     except Exception as e:
         log_error(e)
         return None
@@ -136,9 +138,13 @@ def display_dashboard(data):
 def main():
     st.title("Comprehensive Financial Dashboard")
 
+    # Sidebar for user inputs
+    st.sidebar.header("Dashboard Settings")
+    days = st.sidebar.slider("Number of days to analyze", 7, 365, 30)
+
     cg, fred = init_api_clients()
     if cg is not None and fred is not None:
-        data = get_multi_asset_data(cg, fred)
+        data = get_multi_asset_data(cg, fred, days)
         display_dashboard(data)
     else:
         st.error("Failed to initialize API clients. Please check your API keys and connections.")
