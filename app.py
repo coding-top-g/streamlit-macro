@@ -29,62 +29,71 @@ def init_api_clients():
         log_error(e)
         return None, None
 
-# Function to get multi-asset data
+# Fetch stock data
 @st.cache_data(ttl=3600)
+def get_stock_data(symbols, start_date, end_date):
+    try:
+        data = yf.download(list(symbols.values()), start=start_date, end=end_date)['Close']
+        data.columns = symbols.keys()
+        data.index = data.index.tz_convert('UTC')
+        return data
+    except Exception as e:
+        log_error(e)
+        return None
+
+# Fetch crypto data
+@st.cache_data(ttl=3600)
+def get_crypto_data(cg, coin_id, start_date, end_date):
+    try:
+        data = cg.get_coin_market_chart_range_by_id(id=coin_id, vs_currency='usd', from_timestamp=int(start_date.timestamp()), to_timestamp=int(end_date.timestamp()))
+        df = pd.DataFrame(data['prices'], columns=['timestamp', coin_id.capitalize()])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+        df.set_index('timestamp', inplace=True)
+        return df
+    except Exception as e:
+        log_error(e)
+        return None
+
+# Fetch FRED data
+@st.cache_data(ttl=3600)
+def get_fred_data(fred, series_id, start_date, end_date):
+    try:
+        data = fred.get_series(series_id, start_date, end_date)
+        data.index = data.index.tz_localize('UTC')
+        return data
+    except Exception as e:
+        log_error(e)
+        return None
+
+# Function to get multi-asset data
 def get_multi_asset_data(cg, fred, days=30):
     end_date = datetime.now(timezone.utc)
     start_date = end_date - timedelta(days=days)
     
-    # Stocks and Forex data from Yahoo Finance
-    try:
-        symbols = {
-            'S&P 500': '^GSPC',
-            'NASDAQ': '^IXIC',
-            'EUR/USD': 'EURUSD=X',
-            'GBP/USD': 'GBPUSD=X'
-        }
-        yf_data = yf.download(list(symbols.values()), start=start_date, end=end_date)['Close']
-        yf_data.columns = symbols.keys()
-        yf_data.index = yf_data.index.tz_convert('UTC')
-    except Exception as e:
-        log_error(e)
-        return None
-
-    # Crypto data from CoinGecko
-    try:
-        btc_data = cg.get_coin_market_chart_range_by_id(id='bitcoin', vs_currency='usd', from_timestamp=int(start_date.timestamp()), to_timestamp=int(end_date.timestamp()))
-        eth_data = cg.get_coin_market_chart_range_by_id(id='ethereum', vs_currency='usd', from_timestamp=int(start_date.timestamp()), to_timestamp=int(end_date.timestamp()))
-        
-        btc_df = pd.DataFrame(btc_data['prices'], columns=['timestamp', 'Bitcoin'])
-        eth_df = pd.DataFrame(eth_data['prices'], columns=['timestamp', 'Ethereum'])
-        btc_df['timestamp'] = pd.to_datetime(btc_df['timestamp'], unit='ms', utc=True)
-        eth_df['timestamp'] = pd.to_datetime(eth_df['timestamp'], unit='ms', utc=True)
-        
-        crypto_df = pd.merge(btc_df, eth_df, on='timestamp', how='outer')
-        crypto_df.set_index('timestamp', inplace=True)
-    except Exception as e:
-        log_error(e)
-        return None
-
+    # Stocks and Forex data
+    symbols = {
+        'S&P 500': '^GSPC',
+        'NASDAQ': '^IXIC',
+        'EUR/USD': 'EURUSD=X',
+        'GBP/USD': 'GBPUSD=X'
+    }
+    yf_data = get_stock_data(symbols, start_date, end_date)
+    
+    # Crypto data
+    btc_data = get_crypto_data(cg, 'bitcoin', start_date, end_date)
+    eth_data = get_crypto_data(cg, 'ethereum', start_date, end_date)
+    
     # FRED data
-    try:
-        fred_series = {
-            'US Unemployment Rate': 'UNRATE',
-            'US Inflation Rate': 'T10YIE',
-            'US GDP Growth': 'A191RL1Q225SBEA'
-        }
-        fred_data = pd.DataFrame()
-        for name, series_id in fred_series.items():
-            series = fred.get_series(series_id, start_date, end_date)
-            fred_data[name] = series
-        fred_data.index = fred_data.index.tz_localize('UTC')
-    except Exception as e:
-        log_error(e)
-        return None
-
+    fred_series = {
+        'US Unemployment Rate': 'UNRATE',
+        'US Inflation Rate': 'T10YIE',
+        'US GDP Growth': 'A191RL1Q225SBEA'
+    }
+    fred_data = pd.DataFrame({name: get_fred_data(fred, series_id, start_date, end_date) for name, series_id in fred_series.items()})
+    
     # Combine all data
     try:
-        combined_data = pd.concat([yf_data, crypto_df, fred_data], axis=1)
+        combined_data = pd.concat([yf_data, btc_data, eth_data, fred_data], axis=1)
         combined_data.index.name = 'date'
         return combined_data.ffill().bfill()  # Forward and backward fill to handle any missing data
     except Exception as e:
