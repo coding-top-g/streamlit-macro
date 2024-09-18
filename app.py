@@ -62,7 +62,9 @@ def get_fred_data_wrapper(fred):
     def get_fred_data(series_id, start_date, end_date):
         try:
             data = fred.get_series(series_id, start_date, end_date)
-            data.index = data.index.tz_localize('UTC')
+            if not isinstance(data.index, pd.DatetimeIndex):
+                data.index = pd.to_datetime(data.index)
+            data.index = data.index.tz_localize('UTC', ambiguous='NaT', nonexistent='shift_forward')
             return data
         except Exception as e:
             log_error(e)
@@ -130,8 +132,22 @@ def display_dashboard(data):
             # Key Metrics
             st.subheader("Key Metrics (30-day change)")
             for asset in data.columns:
-                change = (data[asset].iloc[-1] - data[asset].iloc[0]) / data[asset].iloc[0] * 100
-                st.metric(asset, f"{data[asset].iloc[-1]:.2f}", f"{change:.2f}%")
+                try:
+                    first_valid = data[asset].first_valid_index()
+                    last_valid = data[asset].last_valid_index()
+                    if first_valid is not None and last_valid is not None:
+                        start_value = data[asset].loc[first_valid]
+                        end_value = data[asset].loc[last_valid]
+                        if pd.notnull(start_value) and pd.notnull(end_value) and start_value != 0:
+                            change = (end_value - start_value) / start_value * 100
+                            st.metric(asset, f"{end_value:.2f}", f"{change:.2f}%")
+                        else:
+                            st.metric(asset, "N/A", "N/A")
+                    else:
+                        st.metric(asset, "N/A", "N/A")
+                except Exception as e:
+                    st.metric(asset, "Error", "Error")
+                    log_error(e)
 
         # Multi-asset chart
         st.subheader("Multi-Asset and Economic Indicator Movement (Normalized)")
