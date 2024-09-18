@@ -152,25 +152,32 @@ def display_dashboard(data):
 
 # Main function to run the dashboard
 def main():
-    st.title("Comprehensive Financial Dashboard")
+    try:
+        st.title("Comprehensive Financial Dashboard")
 
-    # Sidebar for user inputs
-    st.sidebar.header("Dashboard Settings")
-    days = st.sidebar.slider("Number of days to analyze", 7, 365, 30)
+        # Sidebar for user inputs
+        st.sidebar.header("Dashboard Settings")
+        days = st.sidebar.slider("Number of days to analyze", 7, 365, 30)
 
-    fred = init_fred_client()
-    if fred is not None:
+        fred = init_fred_client()
+        if fred is None:
+            st.error("Failed to initialize FRED API client. Please check your API key and connection.")
+            return
+
         data = get_multi_asset_data(fred, days)
-        if data is not None:
-            display_dashboard(data)
-        else:
+        if data is None:
             st.error("Failed to fetch or process data. Please check the error messages above.")
-    else:
-        st.error("Failed to initialize FRED API client. Please check your API key and connection.")
+            return
 
-    # Add a footer
-    st.markdown(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    st.markdown("Data sources: FRED (Macroeconomic Indicators), Yahoo Finance (Stocks, Forex, Cryptocurrencies)")
+        display_dashboard(data)
+
+        # Add a footer
+        st.markdown(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        st.markdown("Data sources: FRED (Macroeconomic Indicators), Yahoo Finance (Stocks, Forex, Cryptocurrencies)")
+
+    except Exception as e:
+        log_error(e)
+        st.error("An unexpected error occurred. Please check the error message and try again.")
 
 if __name__ == "__main__":
     main()
