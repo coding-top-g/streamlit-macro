@@ -99,6 +99,10 @@ def get_multi_asset_data(fred, days=30):
 
 # Function to display the dashboard
 def display_dashboard(data):
+    if data is None or data.empty:
+        st.error("No data available to display.")
+        return
+
     # Resample data to daily frequency
     daily_data = data.resample('D').last()
 
