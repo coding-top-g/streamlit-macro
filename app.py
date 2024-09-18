@@ -42,28 +42,32 @@ def get_stock_data(symbols, start_date, end_date):
         return None
 
 # Fetch crypto data
-@st.cache_data(ttl=3600)
-def get_crypto_data(cg, coin_id, start_date, end_date):
-    try:
-        data = cg.get_coin_market_chart_range_by_id(id=coin_id, vs_currency='usd', from_timestamp=int(start_date.timestamp()), to_timestamp=int(end_date.timestamp()))
-        df = pd.DataFrame(data['prices'], columns=['timestamp', coin_id.capitalize()])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
-        df.set_index('timestamp', inplace=True)
-        return df
-    except Exception as e:
-        log_error(e)
-        return None
+def get_crypto_data_wrapper(cg):
+    @st.cache_data(ttl=3600)
+    def get_crypto_data(coin_id, start_timestamp, end_timestamp):
+        try:
+            data = cg.get_coin_market_chart_range_by_id(id=coin_id, vs_currency='usd', from_timestamp=start_timestamp, to_timestamp=end_timestamp)
+            df = pd.DataFrame(data['prices'], columns=['timestamp', coin_id.capitalize()])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+            df.set_index('timestamp', inplace=True)
+            return df
+        except Exception as e:
+            log_error(e)
+            return None
+    return get_crypto_data
 
 # Fetch FRED data
-@st.cache_data(ttl=3600)
-def get_fred_data(fred, series_id, start_date, end_date):
-    try:
-        data = fred.get_series(series_id, start_date, end_date)
-        data.index = data.index.tz_localize('UTC')
-        return data
-    except Exception as e:
-        log_error(e)
-        return None
+def get_fred_data_wrapper(fred):
+    @st.cache_data(ttl=3600)
+    def get_fred_data(series_id, start_date, end_date):
+        try:
+            data = fred.get_series(series_id, start_date, end_date)
+            data.index = data.index.tz_localize('UTC')
+            return data
+        except Exception as e:
+            log_error(e)
+            return None
+    return get_fred_data
 
 # Function to get multi-asset data
 def get_multi_asset_data(cg, fred, days=30):
@@ -80,16 +84,18 @@ def get_multi_asset_data(cg, fred, days=30):
     yf_data = get_stock_data(symbols, start_date, end_date)
     
     # Crypto data
-    btc_data = get_crypto_data(cg, 'bitcoin', start_date, end_date)
-    eth_data = get_crypto_data(cg, 'ethereum', start_date, end_date)
+    get_crypto_data = get_crypto_data_wrapper(cg)
+    btc_data = get_crypto_data('bitcoin', int(start_date.timestamp()), int(end_date.timestamp()))
+    eth_data = get_crypto_data('ethereum', int(start_date.timestamp()), int(end_date.timestamp()))
     
     # FRED data
+    get_fred_data = get_fred_data_wrapper(fred)
     fred_series = {
         'US Unemployment Rate': 'UNRATE',
         'US Inflation Rate': 'T10YIE',
         'US GDP Growth': 'A191RL1Q225SBEA'
     }
-    fred_data = pd.DataFrame({name: get_fred_data(fred, series_id, start_date, end_date) for name, series_id in fred_series.items()})
+    fred_data = pd.DataFrame({name: get_fred_data(series_id, start_date, end_date) for name, series_id in fred_series.items()})
     
     # Combine all data
     try:
