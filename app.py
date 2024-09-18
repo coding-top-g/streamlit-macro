@@ -5,12 +5,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta, timezone
 import yfinance as yf
-from pycoingecko import CoinGeckoAPI
 from fredapi import Fred
 import traceback
-import concurrent.futures
-import time
-import random
 
 # Set page configuration
 st.set_page_config(page_title="Comprehensive Financial Dashboard", layout="wide")
@@ -22,20 +18,18 @@ def log_error(error):
     st.text("Traceback:")
     st.text(traceback.format_exc())
 
-# Initialize API clients
+# Initialize FRED API client
 @st.cache_resource
-def init_api_clients():
+def init_fred_client():
     try:
-        cg = CoinGeckoAPI()
-        fred = Fred(api_key=st.secrets["fred_api_key"])
-        return cg, fred
+        return Fred(api_key=st.secrets["fred_api_key"])
     except Exception as e:
         log_error(e)
-        return None, None
+        return None
 
-# Fetch stock data
+# Fetch financial data (stocks, forex, and crypto)
 @st.cache_data(ttl=3600)
-def get_stock_data(symbols, start_date, end_date):
+def get_financial_data(symbols, start_date, end_date):
     try:
         data = yf.download(list(symbols.values()), start=start_date, end=end_date)['Close']
         data.columns = symbols.keys()
@@ -45,111 +39,56 @@ def get_stock_data(symbols, start_date, end_date):
         log_error(e)
         return None
 
-# Fetch crypto data with timeout and retry
-def get_crypto_data_with_retry(cg, coin_id, start_timestamp, end_timestamp, max_retries=3, base_timeout=15):
-    def fetch_data():
-        return cg.get_coin_market_chart_range_by_id(id=coin_id, vs_currency='usd', from_timestamp=start_timestamp, to_timestamp=end_timestamp)
-
-    for attempt in range(max_retries):
-        timeout = base_timeout * (2 ** attempt)  # Exponential backoff
-        try:
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(fetch_data)
-                data = future.result(timeout=timeout)
-                df = pd.DataFrame(data['prices'], columns=['timestamp', coin_id.capitalize()])
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
-                df.set_index('timestamp', inplace=True)
-                return df
-        except concurrent.futures.TimeoutError:
-            if attempt < max_retries - 1:
-                st.warning(f"CoinGecko API call for {coin_id} timed out after {timeout} seconds. Retrying... (Attempt {attempt + 1}/{max_retries})")
-                time.sleep(random.uniform(1, 3))  # Random delay before retry
-            else:
-                raise TimeoutError(f"CoinGecko API call for {coin_id} timed out after {max_retries} attempts")
-        except Exception as e:
-            raise e
-
-# Fetch crypto data wrapper
-def get_crypto_data_wrapper(cg):
-    @st.cache_data(ttl=3600)
-    def get_crypto_data(coin_id, start_timestamp, end_timestamp):
-        try:
-            return get_crypto_data_with_retry(cg, coin_id, start_timestamp, end_timestamp)
-        except Exception as e:
-            log_error(e)
-            return None
-    return get_crypto_data
-
 # Fetch FRED data
-def get_fred_data_wrapper(fred):
-    @st.cache_data(ttl=3600)
-    def get_fred_data(series_id, start_date, end_date):
-        try:
-            data = fred.get_series(series_id, start_date, end_date)
-            if not isinstance(data.index, pd.DatetimeIndex):
-                data.index = pd.to_datetime(data.index)
-            data.index = data.index.tz_localize('UTC', ambiguous='NaT', nonexistent='shift_forward')
-            return data
-        except Exception as e:
-            log_error(e)
-            return None
-    return get_fred_data
+@st.cache_data(ttl=3600)
+def get_fred_data(fred, series_id, start_date, end_date):
+    try:
+        data = fred.get_series(series_id, start_date, end_date)
+        if not isinstance(data.index, pd.DatetimeIndex):
+            data.index = pd.to_datetime(data.index)
+        data.index = data.index.tz_localize('UTC', ambiguous='NaT', nonexistent='shift_forward')
+        return data
+    except Exception as e:
+        log_error(e)
+        return None
 
 # Function to get multi-asset data
-def get_multi_asset_data(cg, fred, days=30):
+def get_multi_asset_data(fred, days=30):
     end_date = datetime.now(timezone.utc)
     start_date = end_date - timedelta(days=days)
     
     progress_bar = st.progress(0)
     status_text = st.empty()
 
-    # Stocks and Forex data
-    status_text.text("Fetching stock and forex data...")
+    # Financial data (stocks, forex, and crypto)
+    status_text.text("Fetching financial data...")
     symbols = {
         'S&P 500': '^GSPC',
         'NASDAQ': '^IXIC',
         'EUR/USD': 'EURUSD=X',
-        'GBP/USD': 'GBPUSD=X'
+        'GBP/USD': 'GBPUSD=X',
+        'Bitcoin': 'BTC-USD',
+        'Ethereum': 'ETH-USD'
     }
-    yf_data = get_stock_data(symbols, start_date, end_date)
-    progress_bar.progress(25)
+    financial_data = get_financial_data(symbols, start_date, end_date)
+    progress_bar.progress(50)
 
-    # Crypto data
-    status_text.text("Fetching cryptocurrency data...")
-    get_crypto_data = get_crypto_data_wrapper(cg)
-    btc_data = get_crypto_data('bitcoin', int(start_date.timestamp()), int(end_date.timestamp()))
-    if btc_data is None:
-        st.error("Failed to fetch Bitcoin data. Skipping...")
-    else:
-        progress_bar.progress(50)
-    
-    eth_data = get_crypto_data('ethereum', int(start_date.timestamp()), int(end_date.timestamp()))
-    if eth_data is None:
-        st.error("Failed to fetch Ethereum data. Skipping...")
-    else:
-        progress_bar.progress(75)
-    
     # FRED data
     status_text.text("Fetching economic indicators...")
-    get_fred_data = get_fred_data_wrapper(fred)
     fred_series = {
         'US Unemployment Rate': 'UNRATE',
         'US Inflation Rate': 'T10YIE',
         'US GDP Growth': 'A191RL1Q225SBEA'
     }
-    fred_data = pd.DataFrame({name: get_fred_data(series_id, start_date, end_date) for name, series_id in fred_series.items()})
+    fred_data = pd.DataFrame({name: get_fred_data(fred, series_id, start_date, end_date) for name, series_id in fred_series.items()})
     progress_bar.progress(100)
     
     # Combine all data
     try:
         status_text.text("Combining data...")
-        data_frames = [df for df in [yf_data, btc_data, eth_data, fred_data] if df is not None]
-        if not data_frames:
-            raise ValueError("No data available to combine")
-        combined_data = pd.concat(data_frames, axis=1)
+        combined_data = pd.concat([financial_data, fred_data], axis=1)
         combined_data.index.name = 'date'
         status_text.text("Data fetching completed.")
-        time.sleep(1)  # Give user a moment to see the completion message
         status_text.empty()
         progress_bar.empty()
         return combined_data.ffill().bfill()  # Forward and backward fill to handle any missing data
@@ -215,19 +154,19 @@ def main():
     st.sidebar.header("Dashboard Settings")
     days = st.sidebar.slider("Number of days to analyze", 7, 365, 30)
 
-    cg, fred = init_api_clients()
-    if cg is not None and fred is not None:
-        data = get_multi_asset_data(cg, fred, days)
+    fred = init_fred_client()
+    if fred is not None:
+        data = get_multi_asset_data(fred, days)
         if data is not None:
             display_dashboard(data)
         else:
             st.error("Failed to fetch or process data. Please check the error messages above.")
     else:
-        st.error("Failed to initialize API clients. Please check your API keys and connections.")
+        st.error("Failed to initialize FRED API client. Please check your API key and connection.")
 
     # Add a footer
     st.markdown(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    st.markdown("Data sources: FRED (Macroeconomic Indicators), Yahoo Finance (Stocks, Forex), CoinGecko (Cryptocurrencies)")
+    st.markdown("Data sources: FRED (Macroeconomic Indicators), Yahoo Finance (Stocks, Forex, Cryptocurrencies)")
 
 if __name__ == "__main__":
     main()
