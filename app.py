@@ -33,7 +33,7 @@ class FinancialDashboard:
         try:
             data = yf.download(list(symbols.values()), start=start_date, end=end_date)['Close']
             data.columns = symbols.keys()
-            data.index = data.index.tz_convert('UTC')
+            data.index = data.index.tz_localize('UTC', ambiguous='NaT', nonexistent='shift_forward')
             return data
         except Exception as e:
             self.log_error(e)
