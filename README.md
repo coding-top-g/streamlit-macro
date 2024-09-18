@@ -1,1 +1,1 @@
-sup g
+sup g grinders
