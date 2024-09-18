@@ -30,7 +30,7 @@ def init_api_clients():
 
 # Function to get multi-asset data
 def get_multi_asset_data(cg, fred, days=30):
-    end_date = datetime.now()
+    end_date = datetime.now(timezone.utc)
     start_date = end_date - timedelta(days=days)
     
     # Stocks and Forex data from Yahoo Finance
@@ -43,6 +43,7 @@ def get_multi_asset_data(cg, fred, days=30):
         }
         yf_data = yf.download(list(symbols.values()), start=start_date, end=end_date)['Close']
         yf_data.columns = symbols.keys()
+        yf_data.index = yf_data.index.tz_localize('UTC')
     except Exception as e:
         log_error(e)
         return None
@@ -54,8 +55,8 @@ def get_multi_asset_data(cg, fred, days=30):
         
         btc_df = pd.DataFrame(btc_data['prices'], columns=['timestamp', 'Bitcoin'])
         eth_df = pd.DataFrame(eth_data['prices'], columns=['timestamp', 'Ethereum'])
-        btc_df['timestamp'] = pd.to_datetime(btc_df['timestamp'], unit='ms')
-        eth_df['timestamp'] = pd.to_datetime(eth_df['timestamp'], unit='ms')
+        btc_df['timestamp'] = pd.to_datetime(btc_df['timestamp'], unit='ms', utc=True)
+        eth_df['timestamp'] = pd.to_datetime(eth_df['timestamp'], unit='ms', utc=True)
         
         crypto_df = pd.merge(btc_df, eth_df, on='timestamp', how='outer')
         crypto_df.set_index('timestamp', inplace=True)
@@ -74,6 +75,7 @@ def get_multi_asset_data(cg, fred, days=30):
         for name, series_id in fred_series.items():
             series = fred.get_series(series_id, start_date, end_date)
             fred_data[name] = series
+        fred_data.index = fred_data.index.tz_localize('UTC')
     except Exception as e:
         log_error(e)
         return None
