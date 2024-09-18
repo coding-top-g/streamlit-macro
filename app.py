@@ -3,103 +3,109 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
+from datetime import datetime, timedelta
+import yfinance as yf
 from pycoingecko import CoinGeckoAPI
 from fredapi import Fred
-from alpha_vantage.timeseries import TimeSeries
-from alpha_vantage.foreignexchange import ForeignExchange
-from datetime import datetime, timedelta
 
 # Initialize API clients
 cg = CoinGeckoAPI()
 fred = Fred(api_key=st.secrets["fred_api_key"])
-alpha_vantage = TimeSeries(key=st.secrets["alpha_vantage_api_key"])
-fx = ForeignExchange(key=st.secrets["alpha_vantage_api_key"])
 
-# Set page configuration
-st.set_page_config(page_title="Global Market Correlation Dashboard", layout="wide")
-
-# Title
-st.title("Global Market Correlation Dashboard")
-
-# Function to get data for multiple assets
+# Function to get multi-asset data
 def get_multi_asset_data(days=30):
     end_date = datetime.now()
     start_date = end_date - timedelta(days=days)
     
-    # Stocks (S&P 500, NASDAQ, DOW)
-    stock_symbols = ['SPY', 'QQQ', 'DIA']
-    stock_data = {}
-    for symbol in stock_symbols:
-        data, _ = alpha_vantage.get_daily(symbol=symbol, outputsize='full')
-        df = pd.DataFrame(data).T
-        df.index = pd.to_datetime(df.index)
-        df = df[df.index >= start_date]
-        stock_data[symbol] = df['4. close'].astype(float)
+    # Stocks and Forex data from Yahoo Finance
+    symbols = {
+        'S&P 500': '^GSPC',
+        'NASDAQ': '^IXIC',
+        'EUR/USD': 'EURUSD=X',
+        'GBP/USD': 'GBPUSD=X'
+    }
+    yf_data = yf.download(list(symbols.values()), start=start_date, end=end_date)['Close']
+    yf_data.columns = symbols.keys()
     
-    # Crypto (Bitcoin, Ethereum)
+    # Crypto data from CoinGecko
     btc_data = cg.get_coin_market_chart_range_by_id(id='bitcoin', vs_currency='usd', from_timestamp=int(start_date.timestamp()), to_timestamp=int(end_date.timestamp()))
     eth_data = cg.get_coin_market_chart_range_by_id(id='ethereum', vs_currency='usd', from_timestamp=int(start_date.timestamp()), to_timestamp=int(end_date.timestamp()))
     
-    # Forex (EUR/USD, GBP/USD)
-    eurusd, _ = fx.get_currency_exchange_daily('EUR', 'USD', outputsize='full')
-    gbpusd, _ = fx.get_currency_exchange_daily('GBP', 'USD', outputsize='full')
+    btc_df = pd.DataFrame(btc_data['prices'], columns=['timestamp', 'Bitcoin'])
+    eth_df = pd.DataFrame(eth_data['prices'], columns=['timestamp', 'Ethereum'])
+    btc_df['timestamp'] = pd.to_datetime(btc_df['timestamp'], unit='ms')
+    eth_df['timestamp'] = pd.to_datetime(eth_df['timestamp'], unit='ms')
+    
+    crypto_df = pd.merge(btc_df, eth_df, on='timestamp', how='outer')
+    crypto_df.set_index('timestamp', inplace=True)
+    
+    # FRED data
+    fred_series = {
+        'US Unemployment Rate': 'UNRATE',
+        'US Inflation Rate': 'T10YIE',
+        'US GDP Growth': 'A191RL1Q225SBEA'
+    }
+    fred_data = pd.DataFrame()
+    for name, series_id in fred_series.items():
+        series = fred.get_series(series_id, start_date, end_date)
+        fred_data[name] = series
     
     # Combine all data
-    combined_data = pd.DataFrame({
-        'S&P 500': stock_data['SPY'],
-        'NASDAQ': stock_data['QQQ'],
-        'DOW': stock_data['DIA'],
-        'Bitcoin': pd.DataFrame(btc_data['prices'], columns=['timestamp', 'price']).set_index('timestamp')['price'],
-        'Ethereum': pd.DataFrame(eth_data['prices'], columns=['timestamp', 'price']).set_index('timestamp')['price'],
-        'EUR/USD': pd.DataFrame(eurusd).T['4. close'].astype(float),
-        'GBP/USD': pd.DataFrame(gbpusd).T['4. close'].astype(float)
-    })
-    
-    combined_data.index = pd.to_datetime(combined_data.index, unit='ms')
-    combined_data = combined_data.sort_index().ffill()
-    return combined_data
+    combined_data = pd.concat([yf_data, crypto_df, fred_data], axis=1)
+    combined_data.index.name = 'date'
+    return combined_data.ffill().bfill()  # Forward and backward fill to handle any missing data
 
-# Get data
-data = get_multi_asset_data()
+# Set page configuration
+st.set_page_config(page_title="Comprehensive Financial Dashboard", layout="wide")
 
-# Calculate correlations
-correlations = data.pct_change().corr()
+# Title
+st.title("Comprehensive Financial Dashboard")
 
-# Create layout
-col1, col2 = st.columns([3, 2])
+try:
+    # Get data
+    data = get_multi_asset_data()
 
-with col1:
-    # Correlation Heatmap
-    st.subheader("Asset Correlation Heatmap")
-    fig = px.imshow(correlations, 
-                    x=correlations.columns, 
-                    y=correlations.columns, 
-                    color_continuous_scale='RdBu_r', 
-                    zmin=-1, zmax=1)
-    fig.update_layout(height=400, width=600, margin=dict(l=0, r=0, t=0, b=0))
+    # Calculate correlations
+    correlations = data.pct_change().corr()
+
+    # Create layout
+    col1, col2 = st.columns([3, 2])
+
+    with col1:
+        # Correlation Heatmap
+        st.subheader("Asset and Economic Indicator Correlation Heatmap")
+        fig = px.imshow(correlations, 
+                        x=correlations.columns, 
+                        y=correlations.columns, 
+                        color_continuous_scale='RdBu_r', 
+                        zmin=-1, zmax=1)
+        fig.update_layout(height=500, width=700, margin=dict(l=0, r=0, t=0, b=0))
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col2:
+        # Key Metrics
+        st.subheader("Key Metrics (30-day change)")
+        for asset in data.columns:
+            change = (data[asset].iloc[-1] - data[asset].iloc[0]) / data[asset].iloc[0] * 100
+            st.metric(asset, f"{data[asset].iloc[-1]:.2f}", f"{change:.2f}%")
+
+    # Multi-asset chart
+    st.subheader("Multi-Asset and Economic Indicator Movement (Normalized)")
+    normalized_data = data / data.iloc[0] * 100
+    fig = px.line(normalized_data, x=normalized_data.index, y=normalized_data.columns)
+    fig.update_layout(height=400, margin=dict(l=0, r=0, t=0, b=0), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
     st.plotly_chart(fig, use_container_width=True)
 
-with col2:
-    # Key Metrics
-    st.subheader("Key Metrics (30-day change)")
-    for asset in data.columns:
-        change = (data[asset].iloc[-1] - data[asset].iloc[0]) / data[asset].iloc[0] * 100
-        st.metric(asset, f"{data[asset].iloc[-1]:.2f}", f"{change:.2f}%")
+    # Volatility comparison
+    st.subheader("30-Day Rolling Volatility")
+    volatility = data.pct_change().rolling(window=30).std() * np.sqrt(252) * 100  # Annualized
+    fig = px.line(volatility, x=volatility.index, y=volatility.columns)
+    fig.update_layout(height=400, margin=dict(l=0, r=0, t=0, b=0), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+    st.plotly_chart(fig, use_container_width=True)
 
-# Multi-asset chart
-st.subheader("Multi-Asset Price Movement (Normalized)")
-normalized_data = data / data.iloc[0] * 100
-fig = px.line(normalized_data, x=normalized_data.index, y=normalized_data.columns)
-fig.update_layout(height=300, margin=dict(l=0, r=0, t=0, b=0), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-st.plotly_chart(fig, use_container_width=True)
-
-# Volatility comparison
-st.subheader("30-Day Rolling Volatility")
-volatility = data.pct_change().rolling(window=30).std() * np.sqrt(252) * 100  # Annualized
-fig = px.line(volatility, x=volatility.index, y=volatility.columns)
-fig.update_layout(height=300, margin=dict(l=0, r=0, t=0, b=0), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-st.plotly_chart(fig, use_container_width=True)
+except Exception as e:
+    st.error(f"An error occurred: {str(e)}")
 
 # Add a footer
 st.markdown(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-st.markdown("Data sources: FRED, CoinGecko, Alpha Vantage")
+st.markdown("Data sources: FRED (Macroeconomic Indicators), Yahoo Finance (Stocks, Forex), CoinGecko (Cryptocurrencies)")
